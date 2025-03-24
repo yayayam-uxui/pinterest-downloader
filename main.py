@@ -63,3 +63,10 @@ async def get_download(filename: str, background_tasks: BackgroundTasks):
         return FileResponse(file_path, media_type="application/zip", filename=filename)
 
     return JSONResponse(status_code=404, content={"detail": "File not found"})
+
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
