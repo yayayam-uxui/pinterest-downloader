@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Apricot Labs x Youuuuu</title>
+
+  <!-- Static assets served from /static -->
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="icon" href="/static/x.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+</head>
+
+<body>
+  <div class="container">
+    <img src="/static/x.svg" alt="Apricot Labs Logo" class="logo" />
+
+    <h1>Download your Pinterest board</h1>
+    <p class="subtext">
+      Ever wanted to download your whole mood board?<br />
+      <strong>I got you.</strong>
+    </p>
+
+    <form id="download-form">
+      <input
+        type="text"
+        id="board-url"
+        placeholder="https://www.pinterest.com/username/boardname/"
+        required
+      />
+      <button type="submit">Download</button>
+    </form>
+
+    <div id="loader" class="loader" style="display:none;"></div>
+    <p id="status"></p>
+
+    <ul class="instructions">
+      <li>Use only boards you <strong>own</strong> or are <strong>shared with you</strong></li>
+      <li>Copy the full link: <code>pinterest.com/username/boardname</code></li>
+    </ul>
+
+    <footer>
+      Designed with <span class="emoji">🍑</span> by
+      <a href="https://www.theapricotlabs.com" target="_blank">The Apricot Labs</a>
+    </footer>
+  </div>
+
+  <!-- Load the JavaScript file from /static -->
+  <script src="/static/main.js"></script>
+</body>
+
+</html>
