@@ -4,13 +4,19 @@ import shutil
 import subprocess
 import uuid
 from pathlib import Path
-from typing import Final, Optional
-from urllib.parse import urlparse
+from typing import Final
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+from download_utils import (
+    has_downloaded_files,
+    is_valid_pinterest_url,
+    resolve_download_file,
+    safe_remove_file,
+)
 
 app = FastAPI()
 
@@ -29,48 +35,6 @@ DOWNLOADS_DIR.mkdir(exist_ok=True)
 
 class DownloadRequest(BaseModel):
     board_url: str
-
-
-def _is_valid_pinterest_url(raw_url: str) -> bool:
-    parsed = urlparse(raw_url.strip())
-    if parsed.scheme not in {"http", "https"}:
-        return False
-
-    host = parsed.netloc.lower().split(":")[0]
-    if host.startswith("www."):
-        host = host[4:]
-
-    if host != "pinterest.com" and not host.endswith(".pinterest.com"):
-        return False
-
-    return bool(parsed.path.strip("/"))
-
-
-def _resolve_download_file(filename: str) -> Optional[Path]:
-    normalized_name = Path(filename).name
-    if normalized_name != filename or "\\" in filename:
-        return None
-
-    if not normalized_name.endswith(ZIP_EXTENSION):
-        return None
-
-    try:
-        uuid.UUID(Path(normalized_name).stem)
-    except ValueError:
-        return None
-
-    return DOWNLOADS_DIR / normalized_name
-
-
-def _safe_remove_file(file_path: Path) -> None:
-    try:
-        file_path.unlink()
-    except FileNotFoundError:
-        pass
-
-
-def _has_downloaded_files(folder_path: Path) -> bool:
-    return any(item.is_file() for item in folder_path.rglob("*"))
 
 
 async def _run_gallery_dl(
@@ -103,7 +67,7 @@ async def root():
 @app.post("/download")
 async def download_pinterest_board(payload: DownloadRequest):
     board_url = payload.board_url.strip()
-    if not _is_valid_pinterest_url(board_url):
+    if not is_valid_pinterest_url(board_url):
         raise HTTPException(
             status_code=400,
             detail="Please provide a valid Pinterest board URL.",
@@ -134,7 +98,7 @@ async def download_pinterest_board(payload: DownloadRequest):
             status_code=500, detail="gallery-dl failed to download this board."
         )
 
-    if not _has_downloaded_files(folder_path):
+    if not has_downloaded_files(folder_path):
         shutil.rmtree(folder_path, ignore_errors=True)
         raise HTTPException(
             status_code=404, detail="No downloadable media found for this board."
@@ -150,14 +114,14 @@ async def download_pinterest_board(payload: DownloadRequest):
 
 @app.get("/downloads/{filename}")
 async def get_download(filename: str, background_tasks: BackgroundTasks):
-    file_path = _resolve_download_file(filename)
+    file_path = resolve_download_file(DOWNLOADS_DIR, filename, ZIP_EXTENSION)
     if file_path is None:
         raise HTTPException(status_code=400, detail="Invalid file name.")
 
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
 
-    background_tasks.add_task(_safe_remove_file, file_path)
+    background_tasks.add_task(safe_remove_file, file_path)
     return FileResponse(file_path, media_type="application/zip", filename=file_path.name)
 
 
