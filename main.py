@@ -1,72 +1,132 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
+import asyncio
+import os
+import shutil
+import subprocess
+import uuid
+from pathlib import Path
+from typing import Final
+
+from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-import subprocess, uuid, shutil, os
-from fastapi import BackgroundTasks
+from pydantic import BaseModel
+
+from download_utils import (
+    has_downloaded_files,
+    is_valid_pinterest_url,
+    resolve_download_file,
+    safe_remove_file,
+)
 
 app = FastAPI()
 
-# Mount static files under /static
-app.mount("/static", StaticFiles(directory="static"), name="static")
+BASE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = BASE_DIR / "static"
+DOWNLOADS_DIR = BASE_DIR / "downloads"
+GALLERY_DL_TIMEOUT_SECONDS: Final[int] = 600
+ZIP_EXTENSION: Final[str] = ".zip"
 
-# Create downloads folder if it doesn't exist
-DOWNLOADS_DIR = "downloads"
-os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+# Mount static files under /static.
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-# Serve the homepage (index.html)
-@app.get("/")
+# Create downloads folder if it doesn't exist.
+DOWNLOADS_DIR.mkdir(exist_ok=True)
+
+
+class DownloadRequest(BaseModel):
+    board_url: str
+
+
+async def _run_gallery_dl(
+    board_url: str, folder_path: Path
+) -> subprocess.CompletedProcess[str]:
+    def _run() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["gallery-dl", "-d", str(folder_path), board_url],
+            capture_output=True,
+            text=True,
+            timeout=GALLERY_DL_TIMEOUT_SECONDS,
+            check=False,
+        )
+
+    return await asyncio.to_thread(_run)
+
+
+async def _make_zip_archive(folder_path: Path) -> Path:
+    zip_file_path = await asyncio.to_thread(
+        shutil.make_archive, str(folder_path), "zip", str(folder_path)
+    )
+    return Path(zip_file_path)
+
+
+@app.get("/", response_class=FileResponse)
 async def root():
-    with open("static/index.html", "r", encoding="utf-8") as f:
-        return HTMLResponse(content=f.read(), status_code=200)
+    return FileResponse(path=STATIC_DIR / "index.html")
 
-# Handle the POST request to download Pinterest board
+
 @app.post("/download")
-async def download_pinterest_board(request: Request):
+async def download_pinterest_board(payload: DownloadRequest):
+    board_url = payload.board_url.strip()
+    if not is_valid_pinterest_url(board_url):
+        raise HTTPException(
+            status_code=400,
+            detail="Please provide a valid Pinterest board URL.",
+        )
+
+    session_id = str(uuid.uuid4())
+    folder_path = DOWNLOADS_DIR / session_id
+    folder_path.mkdir(parents=True, exist_ok=True)
+
     try:
-        data = await request.json()
-        board_url = data.get("board_url")
+        result = await _run_gallery_dl(board_url, folder_path)
+    except subprocess.TimeoutExpired as exc:
+        shutil.rmtree(folder_path, ignore_errors=True)
+        raise HTTPException(
+            status_code=504,
+            detail="Download timed out. Please try again.",
+        ) from exc
+    except FileNotFoundError as exc:
+        shutil.rmtree(folder_path, ignore_errors=True)
+        raise HTTPException(
+            status_code=500,
+            detail="gallery-dl is not installed on the server.",
+        ) from exc
 
-        if not board_url:
-            return JSONResponse(status_code=400, content={"detail": "Missing Pinterest board URL."})
+    if result.returncode != 0:
+        shutil.rmtree(folder_path, ignore_errors=True)
+        raise HTTPException(
+            status_code=500, detail="gallery-dl failed to download this board."
+        )
 
-        session_id = str(uuid.uuid4())
-        folder_path = os.path.join(DOWNLOADS_DIR, session_id)
-        os.makedirs(folder_path, exist_ok=True)
+    if not has_downloaded_files(folder_path):
+        shutil.rmtree(folder_path, ignore_errors=True)
+        raise HTTPException(
+            status_code=404, detail="No downloadable media found for this board."
+        )
 
-        # Run gallery-dl to download the board
-        result = subprocess.run(["gallery-dl", "-d", folder_path, board_url], capture_output=True, text=True)
+    try:
+        zip_file_path = await _make_zip_archive(folder_path)
+    finally:
+        shutil.rmtree(folder_path, ignore_errors=True)
 
-        if result.returncode != 0:
-            return JSONResponse(status_code=500, content={"detail": "Gallery-dl error", "error": result.stderr})
+    return {"download_url": f"/downloads/{zip_file_path.name}"}
 
-        # Zip the downloaded folder
-        zip_file_path = shutil.make_archive(folder_path, 'zip', folder_path)
-        zip_filename = os.path.basename(zip_file_path)
 
-        # Clean up original folder after zipping
-        shutil.rmtree(folder_path)
-
-        return {"download_url": f"/downloads/{zip_filename}"}
-
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"detail": str(e)})
-
-# Serve the zip file for download
 @app.get("/downloads/{filename}")
 async def get_download(filename: str, background_tasks: BackgroundTasks):
-    file_path = os.path.join(DOWNLOADS_DIR, filename)
-    
-    if os.path.exists(file_path):
-        # Schedule file cleanup after response is sent
-        background_tasks.add_task(os.remove, file_path)
-        
-        return FileResponse(file_path, media_type="application/zip", filename=filename)
+    file_path = resolve_download_file(DOWNLOADS_DIR, filename, ZIP_EXTENSION)
+    if file_path is None:
+        raise HTTPException(status_code=400, detail="Invalid file name.")
 
-    return JSONResponse(status_code=404, content={"detail": "File not found"})
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
 
+    background_tasks.add_task(safe_remove_file, file_path)
+    return FileResponse(file_path, media_type="application/zip", filename=file_path.name)
 
 
 if __name__ == "__main__":
     import uvicorn
+
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
