@@ -1,7 +1,6 @@
 import asyncio
 import os
 import shutil
-import subprocess
 import uuid
 from pathlib import Path
 from typing import Final
@@ -23,7 +22,7 @@ app = FastAPI()
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 DOWNLOADS_DIR = BASE_DIR / "downloads"
-GALLERY_DL_TIMEOUT_SECONDS: Final[int] = 600
+MAX_PINS: Final[int] = 500
 ZIP_EXTENSION: Final[str] = ".zip"
 
 # Mount static files under /static.
@@ -37,16 +36,17 @@ class DownloadRequest(BaseModel):
     board_url: str
 
 
-async def _run_gallery_dl(
-    board_url: str, folder_path: Path
-) -> subprocess.CompletedProcess[str]:
-    def _run() -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["gallery-dl", "-d", str(folder_path), board_url],
-            capture_output=True,
-            text=True,
-            timeout=GALLERY_DL_TIMEOUT_SECONDS,
-            check=False,
+async def _scrape_and_download(board_url: str, folder_path: Path) -> list:
+    """Use pinterest-dl to scrape and download pins from a board."""
+    from pinterest_dl import PinterestDL
+
+    def _run():
+        scraper = PinterestDL.with_api(timeout=30, verbose=False)
+        return scraper.scrape_and_download(
+            url=board_url,
+            output_dir=str(folder_path),
+            num=MAX_PINS,
+            download_streams=True,
         )
 
     return await asyncio.to_thread(_run)
@@ -78,27 +78,15 @@ async def download_pinterest_board(payload: DownloadRequest):
     folder_path.mkdir(parents=True, exist_ok=True)
 
     try:
-        result = await _run_gallery_dl(board_url, folder_path)
-    except subprocess.TimeoutExpired as exc:
-        shutil.rmtree(folder_path, ignore_errors=True)
-        raise HTTPException(
-            status_code=504,
-            detail="Download timed out. Please try again.",
-        ) from exc
-    except FileNotFoundError as exc:
+        results = await _scrape_and_download(board_url, folder_path)
+    except Exception as exc:
         shutil.rmtree(folder_path, ignore_errors=True)
         raise HTTPException(
             status_code=500,
-            detail="gallery-dl is not installed on the server.",
+            detail=f"Failed to download board: {exc}",
         ) from exc
 
-    if result.returncode != 0:
-        shutil.rmtree(folder_path, ignore_errors=True)
-        raise HTTPException(
-            status_code=500, detail="gallery-dl failed to download this board."
-        )
-
-    if not has_downloaded_files(folder_path):
+    if not results or not has_downloaded_files(folder_path):
         shutil.rmtree(folder_path, ignore_errors=True)
         raise HTTPException(
             status_code=404, detail="No downloadable media found for this board."
